@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net/http"
 	"os/exec"
 	"strings"
 	"time"
@@ -105,4 +106,19 @@ func DepGraph() (map[string][]string, error) {
 	}
 
 	return moduleMap, nil
+}
+
+func GetModule(module, version string, client *http.Client) ([]byte, error) {
+	resp, err := client.Get(fmt.Sprintf("https://proxy.golang.org/%s/@v/%s.zip", module, version))
+	defer resp.Body.Close()
+	if err != nil {
+		return nil, fmt.Errorf("error getting module zip: %v", err)
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("error reading response body: %v", err)
+	}
+
+	return body, nil
 }

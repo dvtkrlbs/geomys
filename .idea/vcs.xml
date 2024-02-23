@@ -2,7 +2,6 @@
 <project version="4">
   <component name="VcsDirectoryMappings">
     <mapping directory="" vcs="Git" />
-    <mapping directory="$PROJECT_DIR$/buck2-go" vcs="Git" />
     <mapping directory="$PROJECT_DIR$/prelude" vcs="Git" />
   </component>
 </project>

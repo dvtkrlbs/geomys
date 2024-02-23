@@ -13,6 +13,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 )
 
@@ -28,10 +29,10 @@ http_archive(
 `
 
 func main() {
-	deps, err := geomys.DepList()
-	if err != nil {
-		log.Fatalf("error getting dependency list: %v\n", err)
-	}
+	//_, err := geomys.DepList()
+	//if err != nil {
+	//	log.Fatalf("error getting dependency list: %v\n", err)
+	//}
 
 	graph, err := geomys.DepGraph()
 	if err != nil {
@@ -69,80 +70,112 @@ func main() {
 	// fmt.Printf("%+v\n", file)
 
 	var rules []*rule.Rule
+	seenModules := make(map[string]bool)
 	rulesIndex := 0
-	for _, dep := range deps {
-		if dep.Main {
-			continue
-
-		}
-
-		nName := strings.ToLower(dep.Path)
-		canonName := geomys.CanonicalizeModuleName(nName)
-		//tempFile, _ := os.CreateTemp("geomys", fmt.Sprintf("%s@%s", canonName, dep.Version))
-
-		resp, err := client.Get(fmt.Sprintf("https://proxy.golang.org/%s/@v/%s.zip", nName, dep.Version))
-		if err != nil {
-			log.Fatalf("error getting module: %v\n", err)
-		}
-
-		body, err := io.ReadAll(resp.Body)
-		if err != nil {
-			log.Fatalf("error reading response body: %v\n", err)
-		}
-		zipReader, err := zip.NewReader(bytes.NewReader(body), int64(len(body)))
-		if err != nil {
-			log.Fatalf("error reading zip: %v\n", err)
-		}
-
-		fileContents := make([]string, 0)
-		for _, file := range zipReader.File {
-			//fmt.Println(file.Name)
-			if strings.HasSuffix(file.Name, ".go") && !strings.HasSuffix(file.Name, "_test.go") {
-				stripped := strings.TrimPrefix(file.Name, fmt.Sprintf("%s@%s/", nName, dep.Version))
-				//if !strings.Contains(stripped, "/") {
-				if strings.Contains(stripped, "@") || strings.HasPrefix(stripped, "cmd") || strings.Contains(stripped, "example") {
-					continue
-				}
-				fileContents = append(fileContents, stripped)
-				//}
+	for _, deps := range graph {
+		for _, dep := range deps {
+			if seenModules[dep] {
+				continue
 			}
+
+			seenModules[dep] = true
+			split := strings.Split(dep, "@")
+			path, version := split[0], split[1]
+
+			nName := strings.ToLower(path)
+			canonName := geomys.CanonicalizeModuleName(nName)
+			//tempFile, _ := os.CreateTemp("geomys", fmt.Sprintf("%s@%s", canonName, dep.Version))
+
+			body, err := geomys.GetModule(nName, version, client)
+			if err != nil {
+				log.Fatalf("error getting module: %v\n", err)
+			}
+
+			zipReader, err := zip.NewReader(bytes.NewReader(body), int64(len(body)))
+			if err != nil {
+				log.Fatalf("error reading zip: %v\n", err)
+			}
+
+			fileContents := make([]string, 0)
+			for _, file := range zipReader.File {
+				//fmt.Println(file.Name)
+				if strings.HasSuffix(file.Name, ".go") && !strings.HasSuffix(file.Name, "_test.go") {
+					stripped := strings.TrimPrefix(file.Name, fmt.Sprintf("%s@%s/", nName, version))
+					//if !strings.Contains(stripped, "/") {
+					if strings.Contains(stripped, "@") || strings.HasPrefix(stripped, "cmd") || strings.Contains(stripped, "example") {
+						continue
+					}
+					fileContents = append(fileContents, stripped)
+					//}
+				}
+			}
+
+			sum := sha256.Sum256(body)
+
+			archiveRule := rule.NewRule("http_archive", fmt.Sprintf("%s@%s.mod", canonName, version))
+
+			archiveRule.SetAttr("strip_prefix", fmt.Sprintf("%s@%s", nName, version))
+			archiveRule.SetAttr("visibility", []string{"PUBLIC"})
+			archiveRule.SetAttr("sha256", fmt.Sprintf("%x", sum))
+			archiveRule.SetAttr("sub_targets", fileContents)
+			archiveRule.SetAttr("urls", []string{fmt.Sprintf("https://proxy.golang.org/%s/@v/%s.zip", nName, version)})
+
+			depsOfCurrent := graph[fmt.Sprintf("%s@%s", path, version)]
+			goLibraryRule := rule.NewRule("go_library", fmt.Sprintf("%s@%s", canonName, version))
+
+			deps := make([]string, len(depsOfCurrent))
+			for key, value := range depsOfCurrent {
+				split := strings.Split(value, "@")
+				depName := strings.ToLower(split[0])
+				deps[key] = fmt.Sprintf("//third-party:%s@%s", geomys.CanonicalizeModuleName(depName), split[1])
+			}
+
+			srcs := make([]string, 0)
+			subLibs := make(map[string][]string)
+
+			goLibraryRule.SetAttr("srcs", srcs)
+			goLibraryRule.SetAttr("deps", deps)
+			goLibraryRule.SetAttr("package_name", path)
+			goLibraryRule.SetAttr("visibility", []string{"PUBLIC"})
+			for _, file := range fileContents {
+				dir, file := filepath.Split(file)
+				dir = strings.TrimSuffix(dir, "/")
+				if dir != "" {
+					subLib, ok := subLibs[dir]
+					if ok {
+						subLibs[dir] = append(subLib, file)
+					} else {
+						subLibs[dir] = []string{file}
+					}
+				} else {
+					srcs = append(srcs, fmt.Sprintf(":%s@%s.mod[%s]", canonName, version, file))
+				}
+			}
+
+			for dir, files := range subLibs {
+				dir = strings.TrimSuffix(dir, "/")
+				dir = strings.ReplaceAll(dir, "/", "_")
+				subLibName := fmt.Sprintf("%s_%s@%s", canonName, dir, version)
+				subLibRule := rule.NewRule("go_library", subLibName)
+				for _, file := range files {
+					filePath := geomys.CanonicalizeModuleName(filepath.Join(dir, file))
+					srcs = append(srcs, fmt.Sprintf(":%s@%s.mod[%s]", canonName, version, filePath))
+				}
+				subLibRule.SetAttr("deps", []string{fmt.Sprintf(":%s@%s", canonName, version)})
+				subLibRule.SetAttr("package_name", filepath.Join(path, dir))
+				subLibRule.SetAttr("visibility", []string{"PUBLIC"})
+				rules = append(rules, subLibRule)
+				srcs = append(srcs, fmt.Sprintf(":%s", subLibName))
+			}
+
+			//glob := rule.GlobValue{
+			//	Patterns: []string{fmt.Sprintf("$(location :%s@%s.mod)/*.go", canonName, dep.Version)},
+			//	Excludes: []string{fmt.Sprintf("$(location :%s@%s.mod)/*_test.go", canonName, dep.Version)},
+			//}
+			rules = append(rules, archiveRule)
+			rules = append(rules, goLibraryRule)
+			rulesIndex++
 		}
-		resp.Body.Close()
-
-		sum := sha256.Sum256(body)
-
-		archiveRule := rule.NewRule("http_archive", fmt.Sprintf("%s@%s.mod", canonName, dep.Version))
-
-		archiveRule.SetAttr("strip_prefix", fmt.Sprintf("%s@%s", nName, dep.Version))
-		archiveRule.SetAttr("visibility", []string{"PUBLIC"})
-		archiveRule.SetAttr("sha256", fmt.Sprintf("%x", sum))
-		archiveRule.SetAttr("sub_targets", fileContents)
-		archiveRule.SetAttr("urls", []string{fmt.Sprintf("https://proxy.golang.org/%s/@v/%s.zip", nName, dep.Version)})
-
-		depsOfCurrent := graph[fmt.Sprintf("%s@%s", dep.Path, dep.Version)]
-		//goLibraryRule := rule.NewRule("go_library", fmt.Sprintf("%s@%s", canonName, dep.Version))
-		goLibraryRule := rule.NewRule("go_library", canonName)
-		deps := make([]string, len(depsOfCurrent))
-		for key, value := range depsOfCurrent {
-			split := strings.Split(value, "@")
-			deps[key] = fmt.Sprintf("//third-party:%s", geomys.CanonicalizeModuleName(split[0]))
-		}
-
-		srcs := make([]string, 0)
-		for _, file := range fileContents {
-			srcs = append(srcs, fmt.Sprintf(":%s@%s.mod[%s]", canonName, dep.Version, file))
-		}
-		goLibraryRule.SetAttr("srcs", srcs)
-		goLibraryRule.SetAttr("deps", deps)
-		goLibraryRule.SetAttr("package_name", dep.Path)
-		goLibraryRule.SetAttr("visibility", []string{"PUBLIC"})
-		//glob := rule.GlobValue{
-		//	Patterns: []string{fmt.Sprintf("$(location :%s@%s.mod)/*.go", canonName, dep.Version)},
-		//	Excludes: []string{fmt.Sprintf("$(location :%s@%s.mod)/*_test.go", canonName, dep.Version)},
-		//}
-		rules = append(rules, archiveRule)
-		rules = append(rules, goLibraryRule)
-		rulesIndex++
 	}
 	//newRule := rule.NewRule("http_archive", "anstyle-1.0.7.crate")
 	kinds := make(map[string]rule.KindInfo, 0)
