@@ -1,11 +1,11 @@
 package main
 
 import (
-	"github.com/BurntSushi/toml"
+	//"github.com/BurntSushi/toml"
 	"log"
 )
 
 func main() {
-	_ = toml.Encoder{}
+	//_ = toml.Encoder{}
 	log.Println("Hello, world!")
 }

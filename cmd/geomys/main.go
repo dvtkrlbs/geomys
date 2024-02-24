@@ -97,13 +97,35 @@ func main() {
 			}
 
 			fileContents := make([]string, 0)
+			importMaps := make(map[string]map[string]bool)
 			for _, file := range zipReader.File {
 				//fmt.Println(file.Name)
-				if strings.HasSuffix(file.Name, ".go") && !strings.HasSuffix(file.Name, "_test.go") {
+
+				if strings.HasSuffix(file.Name, ".go") && !strings.HasSuffix(file.Name, "_test.go") && !strings.Contains(file.Name, "testdata") {
 					stripped := strings.TrimPrefix(file.Name, fmt.Sprintf("%s@%s/", nName, version))
 					//if !strings.Contains(stripped, "/") {
 					if strings.Contains(stripped, "@") || strings.HasPrefix(stripped, "cmd") || strings.Contains(stripped, "example") {
 						continue
+					}
+
+					fileContent, err := file.Open()
+					if err != nil {
+						log.Fatalf("error opening file: %v\n", err)
+					}
+					imports, err := geomys.GetImports(fileContent)
+					if err != nil {
+						log.Fatalf("error getting imports for %s: %v\n", file.Name, err)
+					}
+					for _, imp := range imports {
+						basePath := strings.TrimSuffix(filepath.Dir(file.Name), "/")
+						basePath = strings.TrimPrefix(basePath, dep)
+						basePath = filepath.Join(path, basePath)
+
+						if importMaps[basePath] == nil {
+							importMaps[basePath] = make(map[string]bool)
+						}
+						importMaps[basePath][imp] = true
+
 					}
 					fileContents = append(fileContents, stripped)
 					//}
@@ -123,17 +145,25 @@ func main() {
 			depsOfCurrent := graph[fmt.Sprintf("%s@%s", path, version)]
 			goLibraryRule := rule.NewRule("go_library", fmt.Sprintf("%s@%s", canonName, version))
 
-			deps := make([]string, len(depsOfCurrent))
-			for key, value := range depsOfCurrent {
-				split := strings.Split(value, "@")
-				depName := strings.ToLower(split[0])
-				deps[key] = fmt.Sprintf("//third-party:%s@%s", geomys.CanonicalizeModuleName(depName), split[1])
+			deps := make([]string, 0)
+			for dep, _ := range importMaps[path] {
+				currentDep := ""
+				for _, needle := range depsOfCurrent {
+					if strings.HasPrefix(needle, dep) {
+						currentDep = dep
+						break
+					}
+				}
+				if currentDep == "" {
+					continue
+				}
+				//depName := strings.ToLower(dep)
+				deps = append(deps, fmt.Sprintf("//third-party:%s", currentDep))
 			}
 
 			srcs := make([]string, 0)
 			subLibs := make(map[string][]string)
 
-			goLibraryRule.SetAttr("srcs", srcs)
 			goLibraryRule.SetAttr("deps", deps)
 			goLibraryRule.SetAttr("package_name", path)
 			goLibraryRule.SetAttr("visibility", []string{"PUBLIC"})
@@ -151,19 +181,32 @@ func main() {
 					srcs = append(srcs, fmt.Sprintf(":%s@%s.mod[%s]", canonName, version, file))
 				}
 			}
+			goLibraryRule.SetAttr("srcs", srcs)
 
 			for dir, files := range subLibs {
-				dir = strings.TrimSuffix(dir, "/")
-				dir = strings.ReplaceAll(dir, "/", "_")
-				subLibName := fmt.Sprintf("%s_%s@%s", canonName, dir, version)
+				subLibSrcs := make([]string, 0)
+				cleanDir := strings.TrimSuffix(dir, "/")
+				cleanDir = strings.ReplaceAll(cleanDir, "/", "_")
+				subLibName := fmt.Sprintf("%s_%s@%s", canonName, cleanDir, version)
 				subLibRule := rule.NewRule("go_library", subLibName)
 				for _, file := range files {
-					filePath := geomys.CanonicalizeModuleName(filepath.Join(dir, file))
-					srcs = append(srcs, fmt.Sprintf(":%s@%s.mod[%s]", canonName, version, filePath))
+					//filePath := geomys.CanonicalizeModuleName(filepath.Join(dir, file))
+					filePath := filepath.Join(dir, file)
+					subLibSrcs = append(subLibSrcs, fmt.Sprintf(":%s@%s.mod[%s]", canonName, version, filePath))
 				}
-				subLibRule.SetAttr("deps", []string{fmt.Sprintf(":%s@%s", canonName, version)})
+				subLibRule.SetAttr("srcs", subLibSrcs)
+				subLibDeps := make([]string, 0)
+				for dep, _ := range importMaps[filepath.Join(path, dir)] {
+					depDir := strings.TrimSuffix(dep, "/")
+					depDir = strings.ReplaceAll(depDir, "/", "_")
+
+					depName := fmt.Sprintf("%s@%s", canonName, version)
+					subLibDeps = append(subLibDeps, fmt.Sprintf(":%s", depName))
+				}
+				//subLibRule.SetAttr("deps", []string{fmt.Sprintf(":%s@%s", canonName, version)})
 				subLibRule.SetAttr("package_name", filepath.Join(path, dir))
 				subLibRule.SetAttr("visibility", []string{"PUBLIC"})
+				subLibRule.SetAttr("deps", subLibDeps)
 				rules = append(rules, subLibRule)
 				srcs = append(srcs, fmt.Sprintf(":%s", subLibName))
 			}

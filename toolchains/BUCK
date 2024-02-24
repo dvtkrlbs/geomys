@@ -15,6 +15,7 @@ system_demo_toolchains()
 
 system_go_toolchain(
     name = "go",
-    go_root = "/home/linuxbrew/.linuxbrew/Cellar/go/1.22.0/libexec/",
+    go_root = "/opt/homebrew/Cellar/go/1.22.0/libexec",
+#    go_root = "/home/linuxbrew/.linuxbrew/Cellar/go/1.22.0/libexec/",
     visibility = ["PUBLIC"],
 )

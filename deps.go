@@ -5,6 +5,8 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"go/parser"
+	"go/token"
 	"io"
 	"net/http"
 	"os/exec"
@@ -121,4 +123,22 @@ func GetModule(module, version string, client *http.Client) ([]byte, error) {
 	}
 
 	return body, nil
+}
+
+func GetImports(file io.ReadCloser) ([]string, error) {
+	fset := token.NewFileSet()
+	parsedFile, err := parser.ParseFile(fset, "", file, parser.ImportsOnly)
+	if err != nil {
+		return nil, fmt.Errorf("error parsing file: %v", err)
+	}
+
+	imports := make([]string, 0)
+	for _, imp := range parsedFile.Imports {
+		val := imp.Path.Value
+		if strings.Contains(val, ".") {
+			imports = append(imports, val)
+		}
+	}
+
+	return imports, nil
 }
