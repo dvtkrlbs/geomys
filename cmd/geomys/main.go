@@ -71,8 +71,12 @@ func main() {
 
 	var rules []*rule.Rule
 	seenModules := make(map[string]bool)
+	modules := make([]geomys.Module, 0)
 	rulesIndex := 0
-	for _, deps := range graph {
+	for module, deps := range graph {
+		module := geomys.Module{
+			Path: module,
+		}
 		for _, dep := range deps {
 			if seenModules[dep] {
 				continue
@@ -81,6 +85,10 @@ func main() {
 			seenModules[dep] = true
 			split := strings.Split(dep, "@")
 			path, version := split[0], split[1]
+			module := geomys.Module{
+				Path:    path,
+				Version: version,
+			}
 
 			nName := strings.ToLower(path)
 			canonName := geomys.CanonicalizeModuleName(nName)
